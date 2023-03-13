@@ -30,6 +30,4 @@ The script works with 2 Stages and then mutliple sub-steps:
 Done
 
 ## Usage and liability
-This script is not an official workaround. Although i put in efforts to test this script in my lab multiple times, it is not excluded that this might cause harm / damage to your VM's - since removing such a key piece is a delicate process. You as the system administrator need to take care and perform these steps with your own judgement and knoweldge. Also it is important to mention: this script does not have guardrails.
-Meaning, there is no further validation if you "Really" want to remove stuff.
-Therfore, if you dont understand a single line in this script, you most likely do not want to use it.
+See License
