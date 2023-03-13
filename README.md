@@ -1,13 +1,6 @@
 # Cleanup-Moc
 A script used to remove the MOC from the ARC Resource Bridge safely - without removing VM's.
 
-
-## Validation and testing
-**If you are using this on a enviroment with AKS for HCI, will screw your whole AKS cluster, resulting in a re-install of AKS!!**
-As mentioned i have validated this script for:
-- Arc Resource Bridge on AzureStack HCI (No other programs or features installed.)
-
-
 ## Workflow
 The script works with 2 Stages and then mutliple sub-steps:
 1. Stage 0 - Grabbing configuration
