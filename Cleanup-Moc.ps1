@@ -1,89 +1,135 @@
 <#
 .SYNOPSIS
-  Script to cleanup MOC configurations from AzureStackHCI systems
+  Script to cleanup MOC configurations from AzureStackHCI 22H2 systems
 .DESCRIPTION
   This script will clear out and remove any information left behind from the MOC without removing any of the VM's etc.
 .NOTES
-  Version:        1.0
+  Version:        2.0
   Author:         Justin Grah
-  Creation Date:  28th October 2022
+  Creation Date:  22nd March 2024
   Purpose/Change: Initial script development
 .EXAMPLE
   .\Cleanup-Moc.ps1
 #>
 
+<#
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Constants                                                                │
+  └──────────────────────────────────────────────────────────────────────────┘
+ #>
+ $mocConfigReg               = 'HKLM:\SOFTWARE\Microsoft\MocPS'
 
-# Import Configuration using offline mode
-$MocConfig = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\MocPS').psconfig + "\psconfig.json" 
-$MocConfig = Get-Content $MocConfig | ConvertFrom-Json
+ $mocWssdNodeAgentReg        = 'HKLM:\SOFTWARE\Microsoft\wssdagent'
+ $mocWssdNodeAgentSvcReg     = 'HKLM:\SYSTEM\CurrentControlSet\Services\wssdagent'
 
-# Setting up some static locations / options that will not change
-$CloudAgentRegistry = 'HKLM:\SOFTWARE\Microsoft\wssdcloudagent'
-$NodeAgentRegistry = 'HKLM:\SOFTWARE\Microsoft\wssdagent'
-$MocRegistry = 'HKLM:\SOFTWARE\Microsoft\MocPS\psconfig'
-$PathsToRemove = @('cloudConfigLocation','imageDir','nodeConfigLocation','workingDir')
+ $mocWssdCloudAgentReg       = 'HKLM:\SOFTWARE\Microsoft\wssdcloudagent'
+ $mocWssdCloudAgentSvcReg    = 'HKLM:\SYSTEM\CurrentControlSet\Services\wssdcloudagent'
 
-$Nodes = Get-ClusterNode
+ $mocCleanupBackupFolderName = 'MOC_REMOVAL_BACKUP'
 
-foreach ($Node in $Nodes) {
-    Write-Host ('Removing MOC on node: ' + $Node.Name)
-    
-    Write-Host "Stage 1/3 - Clearing services and registry"
-    Invoke-Command -ScriptBlock {
-        param(
-            [string] $CloudAgentRegistry,
-            [string] $NodeAgentRegistry,
-            [string] $MocRegistry
-        )
-        # Stop Services when they are running
-        $CloudAgentService = Get-Service -Name 'wssdcloudagent' -ErrorAction SilentlyContinue
-        $NodeAgentService = Get-Service -Name 'wssdagent' -ErrorAction SilentlyContinue
+ <#
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │ Load information from Cluster and MOC                                    │
+   └──────────────────────────────────────────────────────────────────────────┘
+  #>
 
-        if($CloudAgentService.Status -eq "Running") {$CloudAgentService | Stop-Service -Force}
-        if($NodeAgentService.Status -eq "Running") {$NodeAgentService | Stop-Service -Force}
+ $clusterNodes = Get-ClusterNode
+ $mocConfig = (Get-ItemProperty -Path $mocConfigReg).psconfig + "\psconfig.json"
+ $mocConfig = Get-Content $mocConfig | ConvertFrom-Json
 
-        Write-Host "Deleting Service ..."
-        @('wssdcloudagent','wssdagent') | ForEach-Object {
-            $Service = Get-WmiObject -Class Win32_Service -Filter ("Name='" + $_ + "'") 
-            $Service.delete()
-        }
+ $imageDir = $mocConfig.imageDir
+ $workingDir = $mocConfig.workingDir
+ $cloudConfig = $mocConfig.cloudConfigLocation
+ $cloudAgentRole = $mocConfig.clusterRoleName
+ $mocWssdNodeAgentPath = $mocConfig.nodeConfigLocation
 
-        Write-Host "Removing Registry ..."
-        # we mute these errors, since these do not exist on every node!
-        Remove-Item -Path $CloudAgentRegistry -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path $MocRegistry -Force -ErrorAction SilentlyContinue
-        
-        # This one however, should be removed from every node
-        Remove-Item -Path $NodeAgentRegistry -Force
+ <#
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │ Actual cleanup steps                                                     │
+   └──────────────────────────────────────────────────────────────────────────┘
+  #>
+ # Stop CloudAgent and remove Group
+ Write-Host "Stopping ClusterGroup and removing it"
+ $mocClusterGroup = Get-ClusterGroup -Name $cloudAgentRole -ErrorAction SilentlyContinue
+ if($null -ne $mocClusterGroup) {
+     $mocClusterGroup | Stop-ClusterGroup
+     $mocClusterGroup | Remove-ClusterGroup -RemoveResources -Force
+ }
 
-    } -ArgumentList $CloudAgentRegistry,$NodeAgentRegistry,$MocRegistry  -ComputerName $Node.Name
+ # Stop NodeAgents and remove service
+ Invoke-Command -ComputerName $clusterNodes -ScriptBlock {
+     param(
+         $mocWssdNodeAgentReg,
+         $mocWssdNodeAgentSvcReg,
+         $mocWssdNodeAgentPath,
+         $mocWssdCloudAgentReg,
+         $mocWssdCloudAgentSvcReg,
+         $mocCleanupBackupFolderName
+     )
 
-    Write-Host "Stage 2/3 Removing local files"
-    foreach($Path in $PathsToRemove) {
-        $FilePath = $MocConfig.($Path)
+     try{
+         Write-Host ("Cleaning up node: {0}" -f $env:COMPUTERNAME)
+         $backupFolder = New-Item -Path "C:\" -Name $mocCleanupBackupFolderName -ItemType:Directory -ErrorAction Stop
+     } catch {
+         Write-Host "Not able to create backup folder! Operation UNSAFE!"
+     }
 
-        if($null -ne $FilePath) {
-            Invoke-Command -ScriptBlock {
-                param(
-                    [string] $FilePath
-                )
-                # We mute this one since we are also deleting CSV paths.
-                Remove-Item -Path $FilePath -Recurse -Force -ErrorAction SilentlyContinue
-            } -ArgumentList $FilePath -ComputerName $Node.Name
-        }
-    }
-}
+     Write-Host "Stopping WssdAgent Service"
+     $wssdAgentService = Get-Service -Name "wssdagent" -ErrorAction SilentlyContinue
+     if($null -ne $wssdAgentService) {
+         $wssdAgentService | Stop-Service -Force
+     }
 
-Write-Host "Stage 3/3 - Removing cloud agent cluster group"
-$ClusterService = Get-ClusterGroup -Name "ca-*"| Where-Object {($_.GroupType -eq "GenericService") -and (($_.State -eq "Failed") -or ($_.State -eq "Offline"))}
+     Write-Host "Stopping WssdCloudAgent Service"
+     $wssdCloudAgent = Get-Service -Name "wssdcloudagent" -ErrorAction SilentlyContinue
+     if($null -ne $wssdCloudAgent) {
+         $wssdCloudAgent | Stop-Service -Force
+     }
 
-if($null -ne $ClusterService) {
-    try {
-        $ClusterService | Get-ClusterResource | Remove-ClusterResource
-        $ClusterService | Remove-ClusterGroup
-    } catch {
-        Write-Host "An error happend while removing the clustered service " + $
-    }
-} else {
-    Write-Host "Clustered Service was not found. Did you manually delete it?"
-}
+     # Delete services
+     Write-Host "Deleting Services"
+     @('wssdcloudagent','wssdagent') | ForEach-Object {
+         $Service = Get-WmiObject -Class Win32_Service -Filter ("Name='" + $_ + "'")
+         $Service.delete()
+     }
+
+     # Delete directories and registry.
+     Write-Host "Removing Registry"
+     try {
+         if($null -ne $backupFolder) {
+             $regBackup = New-Item -Path $backupFolder.FullName -Name "wssdNodeAgentRegistry" -ItemType:Directory
+             REG EXPORT ($mocWssdNodeAgentReg.Replace(":","")) ($regBackup.FullName + "\wssdagent_data.reg")
+             $mocWssdNodeAgentReg | Get-ChildItem | Remove-Item -Recurse -Force
+         }
+     } catch {  }
+
+     Write-Host "Removing cloud registry"
+     try {
+         if($null -ne $backupFolder) {
+             $regBackup = New-Item -Path $backupFolder.FullName -Name "wssdCloudAgentRegistry" -ItemType:Directory
+             REG EXPORT ($mocWssdCloudAgentReg.Replace(":","")) ($regBackup.FullName + "\wssdcloudagent_data.reg")
+             $mocWssdCloudAgentReg | Get-ChildItem | Remove-Item -Recurse -Force
+         }
+     } catch {  }
+
+     Write-Host "Removing wssdagent data"
+     try {
+         if($null -ne $backupFolder) {
+             $dirBackup = New-Item -Path $backupFolder.FullName -Name "wssdNodeAgentDir" -ItemType:Directory
+             Copy-Item -Path $mocWssdNodeAgentPath -Destination $dirBackup.FullName
+             Remove-Item -Path $mocWssdNodeAgentPath -Recurse -Force
+         }
+     } catch {  }
+
+ } -ArgumentList $mocWssdNodeAgentReg,$mocWssdNodeAgentSvcReg,$mocWssdNodeAgentPath,$mocWssdCloudAgentReg,$mocWssdCloudAgentSvcReg,$mocCleanupBackupFolderName
+
+Write-Host (@"
+ We have cleaned up your environment.
+ You may want to consider removing the following directories manually:
+ - {0}
+ - {1}
+ - {2}
+ Please note: These folders may contain VM related workload data. Please check BEFORE removing!
+
+ Should you need data that we have removed, you can find them in the C:\{3} folder on each of the clustered node.
+"@ -f $imageDir, $workingDir, $cloudConfig, $mocCleanupBackupFolderName)
